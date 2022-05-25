@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "dgl-edgepart"
+version = "0.1.0"
+description = ""
+authors = ["Daniel Stoll <daniel.stoll@tum.de>"]
+readme = "README.md"
+packages = [
+    { include = "dgl_edgepart" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.9, <3.10"
+torch = "^1.9.0, <1.10.0"
+dgl = [
+    {url = "https://data.dgl.ai/wheels/dgl-0.8.0-cp39-cp39-manylinux1_x86_64.whl", platform = "linux"},
+    {url = "https://data.dgl.ai/wheels/dgl-0.8.0-cp39-cp39-win_amd64.whl", platform = "win32"}
+]
+networkx = "^2.8"
+pyarrow = "^7.0.0"
+pandas = "^1.4.2"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.1.2"
+
+[tool.poetry.scripts]
+dgl-edgepart = "dgl_edgepart.main:cli"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
