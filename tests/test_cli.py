@@ -6,7 +6,7 @@ def test_dgl_edgepart_cli():
 
 def test_dgl_partitions():
     (g,), _ = dgl.load_graphs("test/part0/graph.dgl")
-    print(g)
+    print(g.adj())
 
     (g,), _ = dgl.load_graphs("test/part1/graph.dgl")
-    print(g)
+    print(g.adj())

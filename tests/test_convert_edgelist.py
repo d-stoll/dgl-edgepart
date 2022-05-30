@@ -1,8 +1,8 @@
 import importlib
 
-from dgl_edgepart.convert_edgelist import convert_edgelist
+from dgl_edgepart.convert_edgelist import edgepart_file_to_dgl
 
 
 def test_convert_edgelist():
     with importlib.resources.path("tests.resources", "test_partitioned.txt") as edgelist_file:
-        convert_edgelist(str(edgelist_file), "test", 3, "test")
+        edgepart_file_to_dgl(str(edgelist_file), "test", 3, "test")

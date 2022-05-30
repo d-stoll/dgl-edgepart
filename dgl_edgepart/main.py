@@ -1,6 +1,6 @@
 import argparse
 
-from dgl_edgepart.convert_edgelist import convert_edgelist
+from dgl_edgepart.convert_edgelist import edgepart_file_to_dgl
 
 
 def build_parser():
@@ -26,4 +26,4 @@ def cli():
     print(f"Num Parts: {args.num_parts}")
     print(f"Output: {args.output}")
 
-    convert_edgelist(args.input_file, args.graph_name, args.num_parts, args.output)
+    edgepart_file_to_dgl(args.input_file, args.graph_name, args.num_parts, args.output)

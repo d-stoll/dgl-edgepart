@@ -1,74 +1,133 @@
-import os
 import json
-import time
-import argparse
-import numpy as np
+import os
+
 import dgl
-import torch as th
-import pyarrow
+import numpy as np
 import pandas as pd
-from dgl.sparse import libra2dgl_build_adjlist
+import pyarrow
+import torch as th
+from dgl import backend as F, NID, EID, save_graphs
+from dgl import partition_graph_with_halo
+from dgl.data import save_tensors
+from dgl.distributed.partition import _get_inner_node_mask, _get_inner_edge_mask
 from pyarrow import csv
 
 
-def convert_edgelist(input_file: str, graph_name: str, num_parts: int, output_dir: str):
+def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
-
-    num_edges = 0
-    num_nodes = 0
 
     edges = csv.read_csv(input_file, read_options=pyarrow.csv.ReadOptions(column_names=["src", "dst", "part_id"]),
                          parse_options=pyarrow.csv.ParseOptions(delimiter=' ')).to_pandas()
-    tmp_dir = output_dir + '/' + graph_name + '.tmp'
-    os.makedirs(tmp_dir, exist_ok=True)
 
-    for _, (part_id, part_edges) in enumerate(edges.groupby("part_id")):
-        part_edges[["src", "dst"]].to_csv(f"{tmp_dir}/part-{part_id}.tmp", index=False)
+    u = edges["src"].to_numpy()
+    v = edges["dst"].to_numpy()
+    g: dgl.DGLGraph = dgl.graph((u, v))
+
+    src_parts = edges[["src", "part_id"]].rename(columns={"src": "nid"})
+    dst_parts = edges[["dst", "part_id"]].rename(columns={"dst": "nid"})
+
+    # All partitions a node can be assigned
+    node_all_parts = pd.concat([src_parts, dst_parts], ignore_index=True)
+    # One partition for each node
+    node_part = node_all_parts.groupby("nid").apply(lambda x: x.sample(1)).reset_index(drop=True)
+    node_part_tensor = th.tensor(node_part["part_id"].values)
+
+    print(g.number_of_nodes())
+    print(g.adj())
+    print(node_part_tensor)
+    parts, orig_nids, orig_eids = partition_graph_with_halo(g, node_part_tensor, 1, reshuffle=True)
+
+    node_map_val = {}
+    edge_map_val = {}
+    for ntype in g.ntypes:
+        ntype_id = g.get_ntype_id(ntype)
+        val = []
+        node_map_val[ntype] = []
+        for i in parts:
+            inner_node_mask = _get_inner_node_mask(parts[i], ntype_id)
+            val.append(F.as_scalar(F.sum(F.astype(inner_node_mask, F.int64), 0)))
+            inner_nids = F.boolean_mask(parts[i].ndata[NID], inner_node_mask)
+            node_map_val[ntype].append([int(F.as_scalar(inner_nids[0])),
+                                        int(F.as_scalar(inner_nids[-1])) + 1])
+        val = np.cumsum(val).tolist()
+        assert val[-1] == g.number_of_nodes(ntype)
+    for etype in g.etypes:
+        etype_id = g.get_etype_id(etype)
+        val = []
+        edge_map_val[etype] = []
+        for i in parts:
+            inner_edge_mask = _get_inner_edge_mask(parts[i], etype_id)
+            val.append(F.as_scalar(F.sum(F.astype(inner_edge_mask, F.int64), 0)))
+            inner_eids = np.sort(F.asnumpy(F.boolean_mask(parts[i].edata[EID],
+                                                          inner_edge_mask)))
+            edge_map_val[etype].append([int(inner_eids[0]), int(inner_eids[-1]) + 1])
+        val = np.cumsum(val).tolist()
+        assert val[-1] == g.number_of_edges(etype)
+
+    for ntype in node_map_val:
+        val = np.concatenate([np.array(l) for l in node_map_val[ntype]])
+        assert np.all(val[:-1] <= val[1:])
+    for etype in edge_map_val:
+        val = np.concatenate([np.array(l) for l in edge_map_val[etype]])
+        assert np.all(val[:-1] <= val[1:])
+
+    ntypes = {ntype: g.get_ntype_id(ntype) for ntype in g.ntypes}
+    etypes = {etype: g.get_etype_id(etype) for etype in g.etypes}
+
+    part_metadata = {'graph_name': graph_name,
+                     'num_nodes': g.number_of_nodes(),
+                     'num_edges': g.number_of_edges(),
+                     'part_method': "custom",
+                     'num_parts': num_parts,
+                     'halo_hops': 1,
+                     'node_map': node_map_val,
+                     'edge_map': edge_map_val,
+                     'ntypes': ntypes,
+                     'etypes': etypes}
 
     for part_id in range(num_parts):
-        part_dir = output_dir + '/part' + str(part_id)
-        os.makedirs(part_dir, exist_ok=True)
+        part = parts[part_id]
 
-        part_edges = csv.read_csv(f"{tmp_dir}/part-{part_id}.tmp")
+        node_feats = {}
+        edge_feats = {}
 
-        src_ids, dst_ids = part_edges.columns[0].to_numpy(), part_edges.columns[1].to_numpy()
-        assert len(src_ids) == len(dst_ids)
-        num_nodes += len(src_ids)
+        for ntype in g.ntypes:
+            ntype_id = g.get_ntype_id(ntype)
 
-        print('There are {} edges in partition {}'.format(len(src_ids), part_id))
+            ndata_name = 'orig_id'
+            inner_node_mask = _get_inner_node_mask(part, ntype_id)
+            local_nodes = F.boolean_mask(part.ndata[ndata_name], inner_node_mask)
 
-        nids = np.concatenate([src_ids, dst_ids])
-        uniq_ids, idx, inverse_idx = np.unique(nids, return_index=True, return_inverse=True)
+            for name in g.nodes[ntype].data:
+                if name in [NID, 'inner_node']:
+                    continue
+                node_feats[ntype + '/' + name] = F.gather_row(g.nodes[ntype].data[name],
+                                                              local_nodes)
 
-        local_src_id, local_dst_id = np.split(inverse_idx[:len(src_ids) * 2], 2)
-        compact_g = dgl.graph((local_src_id, local_dst_id))
+        for etype in g.etypes:
+            etype_id = g.get_etype_id(etype)
+            edata_name = 'orig_id'
+            inner_edge_mask = _get_inner_edge_mask(part, etype_id)
+            local_edges = F.boolean_mask(part.edata[edata_name], inner_edge_mask)
 
-        num_nodes_part = compact_g.number_of_nodes()
-
-        print('|V|={}'.format(num_nodes_part))
-        print('|E|={}'.format(compact_g.number_of_edges()))
-
-
-
-        dgl.save_graphs(part_dir + '/graph.dgl', [compact_g])
-
-    part_metadata = {
-        'graph_name': graph_name,
-        'num_nodes': num_nodes,
-        'num_edges': num_edges,
-        'part_method': 'custom',
-        'num_parts': num_parts,
-        'halo_hops': 1
-    }
-
-    for part_id in range(num_parts):
-        part_dir = 'part' + str(part_id)
+            for name in g.edges[etype].data:
+                if name in [EID, 'inner_edge']:
+                    continue
+                edge_feats[etype + '/' + name] = F.gather_row(g.edges[etype].data[name],
+                                                              local_edges)
+        part_dir = os.path.join(output_dir, "part" + str(part_id))
         node_feat_file = os.path.join(part_dir, "node_feat.dgl")
         edge_feat_file = os.path.join(part_dir, "edge_feat.dgl")
         part_graph_file = os.path.join(part_dir, "graph.dgl")
         part_metadata['part-{}'.format(part_id)] = {
-            'node_feats': node_feat_file,
-            'edge_feats': edge_feat_file,
-            'part_graph': part_graph_file}
+            'node_feats': os.path.relpath(node_feat_file, output_dir),
+            'edge_feats': os.path.relpath(edge_feat_file, output_dir),
+            'part_graph': os.path.relpath(part_graph_file, output_dir)}
+        os.makedirs(part_dir, mode=0o775, exist_ok=True)
+        save_tensors(node_feat_file, node_feats)
+        save_tensors(edge_feat_file, edge_feats)
+
+        save_graphs(part_graph_file, [part])
+
     with open('{}/{}.json'.format(output_dir, graph_name), 'w') as outfile:
         json.dump(part_metadata, outfile, sort_keys=True, indent=4)
