@@ -13,7 +13,7 @@ from dgl.distributed.partition import _get_inner_node_mask, _get_inner_edge_mask
 from pyarrow import csv
 
 
-def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, output_dir: str):
+def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_method: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
     edges = csv.read_csv(input_file, read_options=pyarrow.csv.ReadOptions(column_names=["src", "dst", "part_id"]),
@@ -47,8 +47,7 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, outpu
             inner_node_mask = _get_inner_node_mask(parts[i], ntype_id)
             val.append(F.as_scalar(F.sum(F.astype(inner_node_mask, F.int64), 0)))
             inner_nids = F.boolean_mask(parts[i].ndata[NID], inner_node_mask)
-            node_map_val[ntype].append([int(F.as_scalar(inner_nids[0])),
-                                        int(F.as_scalar(inner_nids[-1])) + 1])
+            node_map_val[ntype].append([int(F.as_scalar(inner_nids[0])), int(F.as_scalar(inner_nids[-1])) + 1])
         val = np.cumsum(val).tolist()
         assert val[-1] == g.number_of_nodes(ntype)
     for etype in g.etypes:
@@ -58,9 +57,10 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, outpu
         for i in parts:
             inner_edge_mask = _get_inner_edge_mask(parts[i], etype_id)
             val.append(F.as_scalar(F.sum(F.astype(inner_edge_mask, F.int64), 0)))
-            inner_eids = np.sort(F.asnumpy(F.boolean_mask(parts[i].edata[EID],
-                                                          inner_edge_mask)))
-            edge_map_val[etype].append([int(inner_eids[0]), int(inner_eids[-1]) + 1])
+            inner_eids = np.sort(F.asnumpy(F.boolean_mask(parts[i].edata[EID], inner_edge_mask)))
+            edge_map_val[etype].append([
+                int(inner_eids[0]),
+                int(inner_eids[-1]) + 1])
         val = np.cumsum(val).tolist()
         assert val[-1] == g.number_of_edges(etype)
 
@@ -77,7 +77,7 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, outpu
     part_metadata = {'graph_name': graph_name,
                      'num_nodes': g.number_of_nodes(),
                      'num_edges': g.number_of_edges(),
-                     'part_method': "custom",
+                     'part_method': part_method,
                      'num_parts': num_parts,
                      'halo_hops': 1,
                      'node_map': node_map_val,
