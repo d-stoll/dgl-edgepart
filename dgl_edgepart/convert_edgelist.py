@@ -14,6 +14,7 @@ from pyarrow import csv
 
 
 def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_method: str, output_dir: str):
+    np.random.seed(42)
     os.makedirs(output_dir, exist_ok=True)
 
     edges = csv.read_csv(input_file, read_options=pyarrow.csv.ReadOptions(column_names=["src", "dst", "part_id"]),
