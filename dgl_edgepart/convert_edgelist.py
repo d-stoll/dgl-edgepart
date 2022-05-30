@@ -32,9 +32,6 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     node_part = node_all_parts.groupby("nid").apply(lambda x: x.sample(1)).reset_index(drop=True)
     node_part_tensor = th.tensor(node_part["part_id"].values)
 
-    print(g.number_of_nodes())
-    print(g.adj())
-    print(node_part_tensor)
     parts, orig_nids, orig_eids = partition_graph_with_halo(g, node_part_tensor, 1, reshuffle=True)
 
     node_map_val = {}
