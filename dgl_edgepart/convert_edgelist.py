@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 import dgl
 import numpy as np
@@ -17,21 +18,25 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     np.random.seed(42)
     os.makedirs(output_dir, exist_ok=True)
 
+    start = time.time()
     edges = csv.read_csv(input_file, read_options=pyarrow.csv.ReadOptions(column_names=["src", "dst", "part_id"]),
                          parse_options=pyarrow.csv.ParseOptions(delimiter=' ')).to_pandas()
 
     u = edges["src"].to_numpy()
     v = edges["dst"].to_numpy()
     g: dgl.DGLGraph = dgl.graph((u, v))
+    print("Read graph from input file: {:.3f} seconds".format(time.time() - start))
 
     src_parts = edges[["src", "part_id"]].rename(columns={"src": "nid"})
     dst_parts = edges[["dst", "part_id"]].rename(columns={"dst": "nid"})
 
+    start = time.time()
     # All partitions a node can be assigned
     node_all_parts = pd.concat([src_parts, dst_parts], ignore_index=True)
     # One partition for each node
     node_part = node_all_parts.groupby("nid").apply(lambda x: x.sample(1)).reset_index(drop=True)
     node_part_tensor = th.tensor(node_part["part_id"].values)
+    print("Select node partitions: {:.3f} seconds".format(time.time() - start))
 
     parts, orig_nids, orig_eids = partition_graph_with_halo(g, node_part_tensor, 1, reshuffle=True)
 
