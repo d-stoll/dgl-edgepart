@@ -6,12 +6,17 @@ import dgl
 import numpy as np
 import pandas as pd
 import pyarrow
+import torch
 import torch as th
 from dgl import backend as F, NID, EID, save_graphs
 from dgl import partition_graph_with_halo
 from dgl.data import save_tensors
 from dgl.distributed.partition import _get_inner_node_mask, _get_inner_edge_mask
+from dgl.partition import reshuffle_graph
 from pyarrow import csv
+
+from dgl_edgepart.utils.graph_ops import remove_isolated_nodes
+from dgl_edgepart.utils.save import save_partition
 
 
 def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_method: str, output_dir: str):
@@ -38,7 +43,34 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     node_part_tensor = th.tensor(node_part["part_id"].values)
     print("Select node partitions: {:.3f} seconds".format(time.time() - start))
 
-    parts, orig_nids, orig_eids = partition_graph_with_halo(g, node_part_tensor, 1, reshuffle=True)
+    edge_part_tensor = th.tensor(edges["part_id"].values)
+
+    parts = []
+    for pid in range(num_parts):
+        edge_mask = (pid == edge_part_tensor)
+        e_subgraph = dgl.edge_subgraph(g, edge_mask)
+        node_ids = node_part[node_part["part_id"] == pid]["nid"].to_numpy()
+        print(node_ids)
+        n_subgraph = dgl.in_subgraph(g, th.from_numpy(node_ids))
+
+        remove_isolated_nodes(e_subgraph)
+        remove_isolated_nodes(n_subgraph)
+
+        multi_subgraph: dgl.DGLGraph = dgl.merge([e_subgraph, n_subgraph])
+        subgraph = dgl.to_simple(multi_subgraph, return_counts=None, copy_edata=True)
+        print(subgraph.ndata)
+        print(subgraph.edata)
+
+        epart_assign = edges["part_id"].loc[subgraph.edata['_ID']].to_numpy()
+        subgraph.edata['inner_edge'] = th.from_numpy(np.where(epart_assign == pid, 1, 0))
+
+        npart_assign = node_part["part_id"].loc[subgraph.ndata['_ID']].to_numpy()
+        subgraph.ndata['inner_node'] = th.from_numpy(np.where(npart_assign == pid, 1, 0))
+        subgraph.ndata['part_id'] = th.from_numpy(npart_assign)
+
+        print(subgraph)
+        print(subgraph.ndata)
+        print(subgraph.edata)
 
     node_map_val = {}
     edge_map_val = {}
@@ -91,33 +123,6 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     for part_id in range(num_parts):
         part = parts[part_id]
 
-        node_feats = {}
-        edge_feats = {}
-
-        for ntype in g.ntypes:
-            ntype_id = g.get_ntype_id(ntype)
-
-            ndata_name = 'orig_id'
-            inner_node_mask = _get_inner_node_mask(part, ntype_id)
-            local_nodes = F.boolean_mask(part.ndata[ndata_name], inner_node_mask)
-
-            for name in g.nodes[ntype].data:
-                if name in [NID, 'inner_node']:
-                    continue
-                node_feats[ntype + '/' + name] = F.gather_row(g.nodes[ntype].data[name],
-                                                              local_nodes)
-
-        for etype in g.etypes:
-            etype_id = g.get_etype_id(etype)
-            edata_name = 'orig_id'
-            inner_edge_mask = _get_inner_edge_mask(part, etype_id)
-            local_edges = F.boolean_mask(part.edata[edata_name], inner_edge_mask)
-
-            for name in g.edges[etype].data:
-                if name in [EID, 'inner_edge']:
-                    continue
-                edge_feats[etype + '/' + name] = F.gather_row(g.edges[etype].data[name],
-                                                              local_edges)
         part_dir = os.path.join(output_dir, "part" + str(part_id))
         node_feat_file = os.path.join(part_dir, "node_feat.dgl")
         edge_feat_file = os.path.join(part_dir, "edge_feat.dgl")
@@ -126,11 +131,8 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
             'node_feats': os.path.relpath(node_feat_file, output_dir),
             'edge_feats': os.path.relpath(edge_feat_file, output_dir),
             'part_graph': os.path.relpath(part_graph_file, output_dir)}
-        os.makedirs(part_dir, mode=0o775, exist_ok=True)
-        save_tensors(node_feat_file, node_feats)
-        save_tensors(edge_feat_file, edge_feats)
 
-        save_graphs(part_graph_file, [part])
+        save_partition(g, part, part_dir)
 
     with open('{}/{}.json'.format(output_dir, graph_name), 'w') as outfile:
         json.dump(part_metadata, outfile, sort_keys=True, indent=4)
