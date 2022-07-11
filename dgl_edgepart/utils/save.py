@@ -10,9 +10,6 @@ def save_partition(g: dgl.DGLGraph, part: dgl.DGLGraph, part_dir: str):
     node_feats = {}
     edge_feats = {}
 
-    print(part.ndata)
-    print(part.edata)
-
     for ntype in g.ntypes:
         ntype_id = g.get_ntype_id(ntype)
 
