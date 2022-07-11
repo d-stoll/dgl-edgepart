@@ -4,24 +4,26 @@ import time
 
 import dgl
 import numpy as np
-import pandas as pd
 import pyarrow
-import torch
 import torch as th
-from dgl import backend as F, NID, EID, save_graphs
-from dgl import partition_graph_with_halo
-from dgl.data import save_tensors
+from dgl import backend as F, NID, EID
 from dgl.distributed.partition import _get_inner_node_mask, _get_inner_edge_mask
 from dgl.partition import reshuffle_graph
 from pyarrow import csv
 
+from dgl_edgepart.partition.node_partitions import assign_node_partitions
 from dgl_edgepart.utils.graph_ops import remove_isolated_nodes
 from dgl_edgepart.utils.save import save_partition
 
 
-def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_method: str, output_dir: str):
+def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_method: str, output_dir: str,
+                         use_spark: bool):
     np.random.seed(42)
     os.makedirs(output_dir, exist_ok=True)
+
+    start = time.time()
+    node_part = assign_node_partitions(input_file,use_pyspark=use_spark, use_cache=True)
+    print("Select node partitions: {:.3f} seconds".format(time.time() - start))
 
     start = time.time()
     edges = csv.read_csv(input_file, read_options=pyarrow.csv.ReadOptions(column_names=["src", "dst", "part_id"]),
@@ -32,45 +34,28 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     g: dgl.DGLGraph = dgl.graph((u, v))
     print("Read graph from input file: {:.3f} seconds".format(time.time() - start))
 
-    src_parts = edges[["src", "part_id"]].rename(columns={"src": "nid"})
-    dst_parts = edges[["dst", "part_id"]].rename(columns={"dst": "nid"})
+    g, node_part = reshuffle_graph(g, node_part["part_id"])
+    orig_nids = g.ndata['orig_id']
+    orig_eids = g.edata['orig_id']
 
-    start = time.time()
-    # All partitions a node can be assigned
-    node_all_parts = pd.concat([src_parts, dst_parts], ignore_index=True)
-    # One partition for each node
-    node_part = node_all_parts.groupby("nid").apply(lambda x: x.sample(1)).reset_index(drop=True)
-    node_part_tensor = th.tensor(node_part["part_id"].values)
-    print("Select node partitions: {:.3f} seconds".format(time.time() - start))
-
-    edge_part_tensor = th.tensor(edges["part_id"].values)
-
-    parts = []
+    parts = {}
     for pid in range(num_parts):
-        edge_mask = (pid == edge_part_tensor)
-        e_subgraph = dgl.edge_subgraph(g, edge_mask)
-        node_ids = node_part[node_part["part_id"] == pid]["nid"].to_numpy()
-        print(node_ids)
-        n_subgraph = dgl.in_subgraph(g, th.from_numpy(node_ids))
+        node_ids = (node_part == pid).nonzero(as_tuple=True)[0].tolist()
+        part_edge_mask = (edges["part_id"] == pid) | edges["src"].isin(node_ids) | edges["dst"].isin(node_ids)
+        subgraph = dgl.edge_subgraph(g, th.tensor(part_edge_mask), store_ids=True)
 
-        remove_isolated_nodes(e_subgraph)
-        remove_isolated_nodes(n_subgraph)
-
-        multi_subgraph: dgl.DGLGraph = dgl.merge([e_subgraph, n_subgraph])
-        subgraph = dgl.to_simple(multi_subgraph, return_counts=None, copy_edata=True)
-        print(subgraph.ndata)
-        print(subgraph.edata)
+        remove_isolated_nodes(subgraph)
 
         epart_assign = edges["part_id"].loc[subgraph.edata['_ID']].to_numpy()
         subgraph.edata['inner_edge'] = th.from_numpy(np.where(epart_assign == pid, 1, 0))
+        subgraph.edata['orig_id'] = F.gather_row(orig_eids, subgraph.edata[EID])
 
-        npart_assign = node_part["part_id"].loc[subgraph.ndata['_ID']].to_numpy()
-        subgraph.ndata['inner_node'] = th.from_numpy(np.where(npart_assign == pid, 1, 0))
-        subgraph.ndata['part_id'] = th.from_numpy(npart_assign)
+        npart_assign = th.index_select(node_part, 0, subgraph.ndata[NID])
+        subgraph.ndata['inner_node'] = (npart_assign == pid).int()
+        subgraph.ndata['part_id'] = npart_assign
+        subgraph.ndata['orig_id'] = F.gather_row(orig_nids, subgraph.ndata[NID])
 
-        print(subgraph)
-        print(subgraph.ndata)
-        print(subgraph.edata)
+        parts[pid] = subgraph
 
     node_map_val = {}
     edge_map_val = {}

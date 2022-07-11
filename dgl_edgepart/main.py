@@ -16,6 +16,8 @@ def build_parser():
                         help='The number of partitions.')
     parser.add_argument('-o', '--output', required=True, type=str,
                         help='The output directory of the partitioned results.')
+    parser.add_argument('--use-spark', required=False, type=bool,
+                        help='Use PySpark to parallelize Pandas computations.')
 
     return parser
 
@@ -30,6 +32,8 @@ def cli():
     print(f"Part method: {args.part_method}")
     print(f"Num Parts: {args.num_parts}")
     print(f"Output directory: {args.output}")
+    print(f"Use PySpark: {args.use_spark}")
     print(f"========================================================")
 
-    edgepart_file_to_dgl(args.input_file, args.graph_name, args.num_parts, args.part_method, args.output)
+    edgepart_file_to_dgl(args.input_file, args.graph_name, args.num_parts, args.part_method, args.output,
+                         args.use_spark)
