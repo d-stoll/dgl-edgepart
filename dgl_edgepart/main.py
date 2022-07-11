@@ -16,7 +16,7 @@ def build_parser():
                         help='The number of partitions.')
     parser.add_argument('-o', '--output', required=True, type=str,
                         help='The output directory of the partitioned results.')
-    parser.add_argument('--use-spark', required=False, type=bool,
+    parser.add_argument('--use-spark', action="store_true",
                         help='Use PySpark to parallelize Pandas computations.')
 
     return parser
