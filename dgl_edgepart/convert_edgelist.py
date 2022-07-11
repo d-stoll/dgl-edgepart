@@ -44,10 +44,9 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
         start = time.time()
         node_ids = (node_part == pid).nonzero(as_tuple=True)[0]
         orig_node_ids = F.gather_row(orig_nids, node_ids).tolist()
-        orig_part_edge_mask = edges[(edges["part_id"] == pid) | edges["src"].isin(orig_node_ids)
-                          | edges["dst"].isin(orig_node_ids)].index.tolist()
+        orig_part_edge_mask = edges[(edges["part_id"] == pid) | edges["dst"].isin(orig_node_ids)].index.values
         part_edge_mask = th.isin(orig_eids, th.tensor(orig_part_edge_mask))
-        subgraph = dgl.edge_subgraph(g, th.tensor(part_edge_mask), store_ids=True)
+        subgraph = dgl.edge_subgraph(g, part_edge_mask, store_ids=True)
 
         subgraph.edata['orig_id'] = F.gather_row(orig_eids, subgraph.edata[EID])
         epart_assign = edges["part_id"].loc[subgraph.edata['orig_id']].to_numpy()
@@ -57,6 +56,9 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
         npart_assign = th.index_select(node_part, 0, subgraph.ndata['orig_id'])
         subgraph.ndata['inner_node'] = (npart_assign == pid).int()
         subgraph.ndata['part_id'] = npart_assign
+
+        print(subgraph.ndata)
+        print(subgraph.edata)
 
         parts[pid] = subgraph
         print("Finished partition {}: {:.3f} seconds".format(pid+1, time.time() - start))
