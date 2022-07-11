@@ -22,7 +22,7 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
     os.makedirs(output_dir, exist_ok=True)
 
     start = time.time()
-    node_part = assign_node_partitions(input_file, use_pyspark=use_spark, use_cache=False)
+    node_part = assign_node_partitions(input_file, use_pyspark=use_spark, use_cache=True)
     print("Select node partitions: {:.3f} seconds".format(time.time() - start))
 
     start = time.time()
@@ -40,25 +40,26 @@ def edgepart_file_to_dgl(input_file: str, graph_name: str, num_parts: int, part_
 
     parts = {}
     for pid in range(num_parts):
-        print(f"Build partition {pid}/{num_parts}")
+        print(f"Build partition {pid+1}/{num_parts}")
         start = time.time()
-        node_ids = (node_part == pid).nonzero(as_tuple=True)[0].tolist()
-        part_edge_mask = (edges["part_id"] == pid) | edges["src"].isin(node_ids) | edges["dst"].isin(node_ids)
+        node_ids = (node_part == pid).nonzero(as_tuple=True)[0]
+        orig_node_ids = F.gather_row(orig_nids, node_ids).tolist()
+        orig_part_edge_mask = edges[(edges["part_id"] == pid) | edges["src"].isin(orig_node_ids)
+                          | edges["dst"].isin(orig_node_ids)].index.tolist()
+        part_edge_mask = th.isin(orig_eids, th.tensor(orig_part_edge_mask))
         subgraph = dgl.edge_subgraph(g, th.tensor(part_edge_mask), store_ids=True)
 
-        remove_isolated_nodes(subgraph)
-
-        epart_assign = edges["part_id"].loc[subgraph.edata['_ID']].to_numpy()
-        subgraph.edata['inner_edge'] = th.from_numpy(np.where(epart_assign == pid, 1, 0))
         subgraph.edata['orig_id'] = F.gather_row(orig_eids, subgraph.edata[EID])
+        epart_assign = edges["part_id"].loc[subgraph.edata['orig_id']].to_numpy()
+        subgraph.edata['inner_edge'] = th.from_numpy(np.where(epart_assign == pid, 1, 0))
 
-        npart_assign = th.index_select(node_part, 0, subgraph.ndata[NID])
+        subgraph.ndata['orig_id'] = F.gather_row(orig_nids, subgraph.ndata[NID])
+        npart_assign = th.index_select(node_part, 0, subgraph.ndata['orig_id'])
         subgraph.ndata['inner_node'] = (npart_assign == pid).int()
         subgraph.ndata['part_id'] = npart_assign
-        subgraph.ndata['orig_id'] = F.gather_row(orig_nids, subgraph.ndata[NID])
 
         parts[pid] = subgraph
-        print("Finished partition {}: {:.3f} seconds".format(pid, time.time() - start))
+        print("Finished partition {}: {:.3f} seconds".format(pid+1, time.time() - start))
 
     node_map_val = {}
     edge_map_val = {}

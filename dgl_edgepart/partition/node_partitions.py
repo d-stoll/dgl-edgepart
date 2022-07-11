@@ -57,5 +57,6 @@ def assign_node_partitions(partition_file: str, use_pyspark: bool = False, use_c
         node_part = all_parts.rdd.map(lambda row: (row.nid, row.part_id)).groupByKey().flatMap(lambda g: sample(g[1]))
 
         node_part = node_part.map(lambda r: Row(r[0])).toDF().toPandas()
+        node_part.columns=["part_id"]
         node_part.to_csv(output_path, sep=' ', header=False)
         return node_part
